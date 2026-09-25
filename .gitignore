@@ -1,0 +1,14 @@
+# Data: not redistributable
+data/
+
+# Python
+__pycache__/
+*.pyc
+
+# Spyder / editors
+.spyproject/
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
