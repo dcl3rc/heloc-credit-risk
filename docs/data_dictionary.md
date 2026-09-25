@@ -118,7 +118,7 @@ columns use different tables: "never delinquent" is 7 in one and 8 in the other.
 | 60 days delinquent | 3 | 5 |
 | 30 days delinquent | 4 | 6 |
 | Never delinquent | 7 | 8 |
-| Undocumented | 5, 6, 9 | 7, 9 |
+| Undocumented | any other code (present in this file: 5, 6, 9) | any other code (present in this file: 7) |
 
 ## Sources and verification
 
