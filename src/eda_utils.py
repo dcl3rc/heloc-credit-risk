@@ -21,10 +21,8 @@ Contents
 --------
 Output                  save_figure
 Distributions           distribution_summary, plot_histograms
-Numeric vs event        binned_event_rate, monotonicity, univariate_power,
-                        plot_binned_event_rates
-Categorical vs event    categorical_event_rate, chi2_independence,
-                        plot_categorical_event_rates
+Numeric vs event        binned_event_rate, univariate_auc, plot_binned_event_rates
+Categorical vs event    categorical_event_rate, plot_categorical_event_rates
 Feature vs feature      correlated_pairs, plot_correlation_heatmap
 
 Author: Dylan Clerc
@@ -37,7 +35,6 @@ import math
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.stats import binomtest, chi2_contingency, spearmanr
 from sklearn.metrics import roc_auc_score
 
 
@@ -86,9 +83,9 @@ def save_figure(fig: plt.Figure, path: str | Path, dpi: int = 150) -> Path:
 def distribution_summary(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     """Summary statistics per numeric column, sorted by absolute skewness.
 
-    skew_class: "low" (|skew| < 1), "moderate" (1 to 2), "heavy" (>= 2).
-    Heavy skew matters for distance-based models (kernel SVM, k-NN), where a
-    long tail dominates the distance metric even after standardisation.
+    Skewness above about 1 in absolute value indicates a long tail. Long
+    tails matter for distance-based models (kernel SVM), where a few extreme
+    values dominate the distances even after standardisation.
     """
     data = df[cols]
     summary = pd.DataFrame({
@@ -102,10 +99,6 @@ def distribution_summary(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
         "max": data.max(),
         "skew": data.skew(),
     })
-    abs_skew = summary["skew"].abs()
-    summary["skew_class"] = np.select(
-        [abs_skew >= 2, abs_skew >= 1], ["heavy", "moderate"], default="low"
-    )
     return summary.sort_values("skew", key=np.abs, ascending=False)
 
 
@@ -151,52 +144,32 @@ def binned_event_rate(x: pd.Series, y: pd.Series, n_bins: int = 10) -> pd.DataFr
     return table
 
 
-def monotonicity(table: pd.DataFrame) -> float:
-    """Spearman correlation between bin order and event rate.
+def univariate_auc(df: pd.DataFrame, cols: list[str], y: pd.Series) -> pd.DataFrame:
+    """Predictive power of each numeric feature used alone, on non-missing rows.
 
-    +1 or -1: the event rate moves in one direction across the bins, which a
-    linear model captures well. Near 0: non-monotone (U-shape, threshold),
-    where nonlinear models can gain. The missing-value row is excluded.
-    Returns NaN with fewer than three bins.
-    """
-    rates = table.drop(index="missing", errors="ignore")["event_rate"]
-    if len(rates) < 3:
-        return np.nan
-    return spearmanr(np.arange(len(rates)), rates).statistic
+    auc        ROC-AUC with the feature itself as the score: the probability
+               that a random row with the event has a higher value than a
+               random row without it. 0.5 = no information.
+    direction  "higher -> more events" if auc > 0.5, else "higher -> fewer
+               events" (an AUC below 0.5 is as informative as its mirror).
+    strength   max(auc, 1 - auc): the AUC once the direction is accounted
+               for, used to rank the features.
 
-
-def univariate_power(
-    df: pd.DataFrame, cols: list[str], y: pd.Series, n_bins: int = 10
-) -> pd.DataFrame:
-    """Association of each numeric feature with the event, on non-missing rows.
-
-    auc:          ROC-AUC using the feature alone as a score. 0.5 = no
-                  discrimination; above 0.5 = higher values signal more events.
-    gini:         2 * auc - 1, in [-1, 1]; the usual credit-scoring measure.
-                  |gini| ranks predictive power regardless of direction.
-    spearman_rho: rank correlation between the feature and the event.
-    monotonicity: see monotonicity(); n_bins is the number of bins used.
-
-    Sorted by |gini|, strongest first.
+    Sorted by strength, strongest first.
     """
     y = _as_event(y)
     rows = []
     for col in cols:
         mask = df[col].notna()
-        x, t = df.loc[mask, col], y.loc[mask]
-        auc = roc_auc_score(t, x)
-        table = binned_event_rate(df[col], y, n_bins)
+        auc = roc_auc_score(y.loc[mask], df.loc[mask, col])
         rows.append({
             "feature": col,
             "n": int(mask.sum()),
             "auc": auc,
-            "gini": 2 * auc - 1,
-            "spearman_rho": spearmanr(x, t).statistic,
-            "n_bins": len(table.drop(index="missing", errors="ignore")),
-            "monotonicity": monotonicity(table),
+            "direction": "higher -> more events" if auc > 0.5 else "higher -> fewer events",
+            "strength": max(auc, 1 - auc),
         })
-    out = pd.DataFrame(rows).set_index("feature")
-    return out.sort_values("gini", key=np.abs, ascending=False)
+    return pd.DataFrame(rows).set_index("feature").sort_values("strength", ascending=False)
 
 
 def plot_binned_event_rates(
@@ -205,6 +178,8 @@ def plot_binned_event_rates(
 ) -> plt.Figure:
     """Event rate across the bins of each feature, in a grid.
 
+    A curve that rises or falls steadily is well captured by a linear model;
+    a curve that bends back or jumps suggests a nonlinear effect.
     Dashed grey line: overall event rate. Dotted orange line: event rate
     among rows where the feature is missing.
     """
@@ -240,50 +215,22 @@ def plot_binned_event_rates(
 # Categorical features vs event
 #===========================================================================
 
-def categorical_event_rate(
-    x: pd.Series, y: pd.Series, confidence: float = 0.95
-) -> pd.DataFrame:
-    """Event rate per level, with a Wilson confidence interval.
+def categorical_event_rate(x: pd.Series, y: pd.Series) -> pd.DataFrame:
+    """Number of rows and event rate per level of a categorical feature.
 
-    The interval shows how precisely each rate is estimated: rare levels get
-    wide intervals, which signals they cannot be estimated reliably and are
-    candidates for merging before encoding.
+    Levels with few rows give unreliable rates and are candidates for
+    grouping before one-hot encoding.
     """
     y = _as_event(y)
-    rows = []
-    for level, group in y.groupby(x, observed=True):
-        k, n = int(group.sum()), len(group)
-        ci = binomtest(k, n).proportion_ci(confidence_level=confidence, method="wilson")
-        rows.append({
-            "level": level, "count": n, "event_rate": k / n,
-            "ci_low": ci.low, "ci_high": ci.high,
-        })
-    return pd.DataFrame(rows).set_index("level")
-
-
-def chi2_independence(x: pd.Series, y: pd.Series) -> dict:
-    """Chi-square test of independence between a categorical feature and the event.
-
-    Returns the statistic, p-value, degrees of freedom, Cramer's V (effect
-    size in [0, 1], comparable across features) and the smallest expected
-    count. The test's approximation is unreliable when expected counts fall
-    below about 5, which rare levels cause.
-    """
-    y = _as_event(y)
-    table = pd.crosstab(x, y)
-    stat, p_value, dof, expected = chi2_contingency(table)
-    n = table.to_numpy().sum()
-    cramers_v = math.sqrt(stat / (n * (min(table.shape) - 1)))
-    return {
-        "chi2": stat, "p_value": p_value, "dof": dof,
-        "cramers_v": cramers_v, "min_expected": expected.min(),
-    }
+    table = y.groupby(x, observed=True).agg(count="size", event_rate="mean")
+    table.index.name = "level"
+    return table
 
 
 def plot_categorical_event_rates(
     df: pd.DataFrame, cols: list[str], y: pd.Series, ncols: int = 2
 ) -> plt.Figure:
-    """Bar chart of the event rate per level, with confidence intervals and counts."""
+    """Bar chart of the event rate per level, labelled with the number of rows."""
     y = _as_event(y)
     overall = y.mean()
     fig, axes = _grid(len(cols), ncols, width=6.0, height=4.0)
@@ -291,24 +238,19 @@ def plot_categorical_event_rates(
     for ax, col in zip(axes, cols):
         table = categorical_event_rate(df[col], y)
         positions = np.arange(len(table))
-        errors = np.vstack([
-            table["event_rate"] - table["ci_low"],
-            table["ci_high"] - table["event_rate"],
-        ])
-        ax.bar(positions, table["event_rate"], yerr=errors, capsize=3,
-               color="steelblue", edgecolor="white")
+        ax.bar(positions, table["event_rate"], color="steelblue", edgecolor="white")
         ax.axhline(overall, color="grey", ls="--", lw=0.8)
-        for pos, (rate, count) in enumerate(zip(table["ci_high"], table["count"])):
+        for pos, (rate, count) in enumerate(zip(table["event_rate"], table["count"])):
             ax.text(pos, rate + 0.02, f"n={count}", ha="center", fontsize=7)
 
         ax.set_xticks(positions)
         ax.set_xticklabels(table.index.astype(str))
-        ax.set_ylim(0, 1.1)
+        ax.set_ylim(0, 1.05)
         ax.set_title(col, fontsize=10)
         ax.set_xlabel("code")
         ax.set_ylabel("event rate")
 
-    fig.suptitle("Event rate by level (95% CI; grey dashed: overall)", fontsize=12)
+    fig.suptitle("Event rate by level (grey dashed: overall)", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return fig
 
