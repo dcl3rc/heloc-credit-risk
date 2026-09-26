@@ -32,8 +32,9 @@ Steps
 (i)   Inspect a 1,000-row sample: dtypes, summary statistics.
 (ii)  Load the full file with explicit dtypes; validate and encode the target.
 (iii) Decode special values (-9, -8, -7): drop rows with no bureau record,
-      create indicator columns, replace codes with NaN, check none remain.
-(iv)  Check indicator columns for linear dependence; drop exact duplicates.
+      drop exact duplicates, create indicator columns, replace codes with
+      NaN, check none remain.
+(iv)  Check indicator columns for linear dependence.
 (v)   Declare MaxDelq2PublicRecLast12M and MaxDelqEver as categorical.
 (vi)  Final inspection.
 

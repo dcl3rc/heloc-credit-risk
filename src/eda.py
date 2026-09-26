@@ -10,9 +10,9 @@ relationships. Produces understanding and decisions; does not modify the data.
 Steps
 -----
 (1) Target distribution: class balance, baseline, effect of dropped rows.
-(2) Missingness versus the target: are the indicator columns informative?
+(2) Missingness versus the target: does being missing change the default rate?
 (3) Distributions of numeric features: skewness, extreme values, domain checks.
-(4) Numeric features versus the target: predictive power and monotonicity.
+(4) Numeric features versus the target: predictive power and shape.
 (5) Categorical features versus the target: default rate per code.
 (6) Correlation between numeric features: redundant clusters.
 
@@ -29,9 +29,6 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
-from scipy.stats import binomtest, fisher_exact
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold, cross_val_score
 
 from prepare_data import DATA_PATH, load_clean_data
 import eda_utils as eu
@@ -65,10 +62,9 @@ n_dropped = int(no_record.sum())
 bad_dropped = int((raw.loc[no_record, TARGET] == "Bad").sum())
 bad_rate_clean = (df[TARGET] == 0).mean()
 
-test = binomtest(bad_dropped, n_dropped, p=bad_rate_clean)
+# Similar rates mean the drop did not change the population's default rate
 print(f"\nBad rate, clean data:   {bad_rate_clean:.1%}")
 print(f"Bad rate, dropped rows: {bad_dropped / n_dropped:.1%} (n = {n_dropped})")
-print(f"Binomial test p-value:  {test.pvalue:.3f}")
 
 #================== (2) Missingness versus the target ==================
 
@@ -84,35 +80,25 @@ missing_table.index = missing_table.index.map({False: "complete", True: "at leas
 print(missing_table)
 
 # (b) Each indicator: bad rate when flagged vs not flagged
+# A large difference means the special code carries information about
+# default, which is why each code was kept in its own indicator column.
+# Groups with few flagged rows (n_flagged) give unreliable differences.
 indicator_cols = [c for c in df.columns if "__" in c]
-alpha = 0.05 / len(indicator_cols)  # Bonferroni-corrected threshold
 
 rows = []
 for col in indicator_cols:
     flagged = df[col] == 1
-    _, p_value = fisher_exact(pd.crosstab(flagged, is_bad))
     rows.append({
         "indicator": col,
         "n_flagged": int(flagged.sum()),
         "bad_if_flagged": is_bad[flagged].mean(),
         "bad_if_not": is_bad[~flagged].mean(),
-        "p_value": p_value,
     })
 
 indicator_table = pd.DataFrame(rows).set_index("indicator")
 indicator_table["diff_pp"] = 100 * (indicator_table["bad_if_flagged"] - indicator_table["bad_if_not"])
-indicator_table["significant"] = indicator_table["p_value"] < alpha
-print(f"\nBonferroni threshold: {alpha:.4f}")
+print()
 print(indicator_table.sort_values("diff_pp").round(3).to_string())
-
-# (c) Joint predictive power of the indicators alone
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
-auc = cross_val_score(
-    LogisticRegression(max_iter=1000),
-    df[indicator_cols], df[TARGET],
-    cv=cv, scoring="roc_auc",
-)
-print(f"\nIndicators-only ROC-AUC: {auc.mean():.3f} (sd {auc.std(ddof=1):.3f})")
 
 #============== (3) Distributions of numeric features ==============
 '''
@@ -132,7 +118,6 @@ distribution_table = eu.distribution_summary(df, numeric_cols)
 print("\n" + "=" * 70)
 print("Distributions of numeric features:\n")
 print(distribution_table.round(2).to_string())
-print(f"\nSkew classes: {distribution_table['skew_class'].value_counts().to_dict()}")
 
 # Domain check: percentages and fractions above 100
 percent_cols = [c for c in numeric_cols if c.startswith(("Percent", "NetFraction"))]
@@ -146,20 +131,18 @@ eu.save_figure(fig, FIGURES_DIR / "03_distributions.png")
 #=========== (4) Numeric features versus the target ===========
 '''
 Question: how strongly, and in what shape, does each feature relate to default?
-Why: |gini| ranks predictive power; monotonicity tells whether a linear model
-can capture the relationship (monotone) or a nonlinear one should gain
-(non-monotone). This sets expectations for logistic regression vs SVM.
-The event here is Bad, so a positive gini means higher values, more default.
+Why: the AUC of each feature used alone ranks its predictive power. The
+binned default-rate curves show the shape: a curve that rises or falls
+steadily is well captured by a linear model such as logistic regression,
+whereas bends or jumps are where a nonlinear model (SVM) could gain.
+The event here is Bad, so "higher -> more events" means higher values go
+with more default.
 '''
 
-power_table = eu.univariate_power(df, numeric_cols, is_bad)
+power_table = eu.univariate_auc(df, numeric_cols, is_bad)
 print("\n" + "=" * 70)
-print("Numeric features versus default (sorted by |gini|):\n")
+print("Numeric features versus default (sorted by strength):\n")
 print(power_table.round(3).to_string())
-
-# Features whose relationship with default is not monotone
-non_monotone = power_table[power_table["monotonicity"].abs() < 0.8]
-print(f"\nNon-monotone features (|monotonicity| < 0.8): {list(non_monotone.index)}")
 
 fig = eu.plot_binned_event_rates(df, list(power_table.index), is_bad)
 eu.save_figure(fig, FIGURES_DIR / "04_binned_default_rates.png")
@@ -168,9 +151,9 @@ eu.save_figure(fig, FIGURES_DIR / "04_binned_default_rates.png")
 '''
 Question: how does the default rate vary across the codes of the two
 delinquency status columns?
-Why: confirms the categorical treatment (a non-monotone pattern cannot be
-captured by one linear coefficient) and identifies rare codes to merge
-before one-hot encoding.
+Why: confirms the categorical treatment (if the default rate does not move
+steadily across the codes, one linear coefficient on the code number is
+wrong) and identifies rare codes to merge before one-hot encoding.
 '''
 
 print("\n" + "=" * 70)
@@ -178,10 +161,6 @@ print("Categorical features versus default:")
 for col in categorical_cols:
     print(f"\n--- {col} ---")
     print(eu.categorical_event_rate(df[col], is_bad).round(3).to_string())
-    result = eu.chi2_independence(df[col], is_bad)
-    print(f"chi2 = {result['chi2']:.1f}, dof = {result['dof']}, "
-          f"p = {result['p_value']:.2e}, Cramer's V = {result['cramers_v']:.3f}, "
-          f"min expected count = {result['min_expected']:.1f}")
 
 fig = eu.plot_categorical_event_rates(df, categorical_cols, is_bad)
 eu.save_figure(fig, FIGURES_DIR / "05_categorical_default_rates.png")

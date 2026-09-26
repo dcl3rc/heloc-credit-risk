@@ -20,7 +20,7 @@ support vector machine (SVM). It covers the full workflow:
 | Are the predicted default probabilities reliable? | Yes. In every decile, predicted and observed default rates agree to within about 3 percentage points. |
 
 **Recommended model: the logistic regression.** It predicts as well as the
-SVM, trains about a hundred times faster, and yields both interpretable
+SVM, is tuned in seconds rather than minutes, and yields both interpretable
 coefficients and reliable probabilities.
 
 ## Contents
@@ -54,7 +54,7 @@ Column meanings, special codes and code tables are documented in
 ## Repository structure
 
 ```
-heloc/
+heloc-credit-risk/
 ├── data/                         raw data (not tracked, see above)
 ├── docs/
 │   └── data_dictionary.md        columns, special codes, code tables, sources
@@ -76,12 +76,12 @@ and they can be reused for other binary classification problems.
 
 ## Getting started
 
-**Requirements.** Python 3.10 or later, and the packages pinned in
+**Requirements.** Python 3.11 or later, and the packages pinned in
 [`requirements.txt`](requirements.txt).
 
 ```bash
-git clone git@github.com:dcl3rc/heloc.git
-cd heloc
+git clone https://github.com/dcl3rc/heloc-credit-risk.git
+cd heloc-credit-risk
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -163,7 +163,7 @@ $$\log\frac{P(\text{default}\mid z)}{1 - P(\text{default}\mid z)} = \beta_0 + \b
 
 estimated by minimising the log loss plus an L2 penalty
 $\lVert\beta\rVert^2/(2C)$. The SVM classifies by the sign of
-$f(z) = \sum_i \alpha_i y_i \exp(-\gamma\lVert z - z_i\rVert^2) + b$, where the
+$f(z) = \sum_i \alpha_i y_i \exp(-\gamma\lVert z - z_i\rVert^2) + b$, with $y_i = \pm 1$, where the
 sum runs over the training applicants that define the boundary (the support
 vectors). Its output `f(z)` ranks applicants but is not a probability.
 
