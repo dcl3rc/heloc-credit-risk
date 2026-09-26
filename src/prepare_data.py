@@ -32,7 +32,7 @@ Steps
 (i)   Inspect a 1,000-row sample: dtypes, summary statistics.
 (ii)  Load the full file with explicit dtypes; validate and encode the target.
 (iii) Decode special values (-9, -8, -7): drop rows with no bureau record,
-      create indicator columns, replace codes with NaN, assert none remain.
+      create indicator columns, replace codes with NaN, check none remain.
 (iv)  Check indicator columns for linear dependence; drop exact duplicates.
 (v)   Declare MaxDelq2PublicRecLast12M and MaxDelqEver as categorical.
 (vi)  Final inspection.
@@ -92,7 +92,9 @@ def load_clean_data(path: Path, verbose: bool = False) -> pd.DataFrame:
 
     # Validate and encode the target variable
     VALID_VALUES = {"Good", "Bad"}
-    unique_values = set(df["RiskPerformance"].dropna().unique())
+    if df["RiskPerformance"].isna().any():
+        raise ValueError("RiskPerformance contains missing values")
+    unique_values = set(df["RiskPerformance"].unique())
     unexpected_values = unique_values - VALID_VALUES
 
     if unexpected_values:
@@ -151,8 +153,10 @@ def load_clean_data(path: Path, verbose: bool = False) -> pd.DataFrame:
     # Replace the codes [-9, -8, -7] with NaN
     df[feature_cols] = df[feature_cols].replace([-9, -8, -7], np.nan)
 
-    # Verify no negative value remains anywhere
-    assert (df[feature_cols].min() >= 0).all(), "Sentinel values remain"
+    # Verify no negative value remains anywhere (raise, not assert: assert
+    # statements are skipped when Python runs with the -O flag)
+    if (df[feature_cols].min() < 0).any():
+        raise ValueError("Sentinel values remain after decoding")
 
     #======= (iv) Check for linear dependence between indicators =======
 
